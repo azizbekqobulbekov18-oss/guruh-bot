@@ -3,12 +3,16 @@ import logging
 import sqlite3
 import re
 import threading
+import urllib.request
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ChatPermissions
 
 TOKEN = "8972599548:AAFp4yMJcKTp1TvQljMwwBNtpNAofLrUf00"
+
+# === RENDER URL ni o'zingiznikiga almashtiring ===
+RENDER_URL = "https://YOUR_APP_NAME.onrender.com"
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
@@ -31,55 +35,72 @@ def http_server():
     server = HTTPServer(("0.0.0.0", 10000), Handler)
     server.serve_forever()
 
-# --- MA'LUMOTLAR BAZASI ---
+# --- KEEP-ALIVE: har 5 daqiqada o'ziga ping ---
+def keep_alive():
+    while True:
+        try:
+            urllib.request.urlopen(RENDER_URL, timeout=10)
+            print("🏓 Keep-alive ping yuborildi")
+        except Exception as e:
+            print(f"⚠️ Keep-alive xato: {e}")
+        threading.Event().wait(300)  # 5 daqiqa
+
+# --- MA'LUMOTLAR BAZASI (thread-safe) ---
+db_lock = threading.Lock()
+
 def baza_yarat():
-    conn = sqlite3.connect("bot_bazasi.db")
-    cursor = conn.cursor()
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS statistika (
-            chat_id INTEGER PRIMARY KEY,
-            xabarlar_soni INTEGER DEFAULT 0
-        )
-    """)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS kanallar (
-            chat_id INTEGER,
-            kanal TEXT,
-            PRIMARY KEY (chat_id, kanal)
-        )
-    """)
-    conn.commit()
-    conn.close()
+    with db_lock:
+        conn = sqlite3.connect("bot_bazasi.db", check_same_thread=False)
+        cursor = conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS statistika (
+                chat_id INTEGER PRIMARY KEY,
+                xabarlar_soni INTEGER DEFAULT 0
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS kanallar (
+                chat_id INTEGER,
+                kanal TEXT,
+                PRIMARY KEY (chat_id, kanal)
+            )
+        """)
+        conn.commit()
+        conn.close()
 
 def xabarni_sana(chat_id):
-    conn = sqlite3.connect("bot_bazasi.db")
-    cursor = conn.cursor()
-    cursor.execute("INSERT OR IGNORE INTO statistika (chat_id) VALUES (?)", (chat_id,))
-    cursor.execute("UPDATE statistika SET xabarlar_soni = xabarlar_soni + 1 WHERE chat_id = ?", (chat_id,))
-    conn.commit()
-    conn.close()
+    with db_lock:
+        conn = sqlite3.connect("bot_bazasi.db", check_same_thread=False)
+        cursor = conn.cursor()
+        cursor.execute("INSERT OR IGNORE INTO statistika (chat_id) VALUES (?)", (chat_id,))
+        cursor.execute("UPDATE statistika SET xabarlar_soni = xabarlar_soni + 1 WHERE chat_id = ?", (chat_id,))
+        conn.commit()
+        conn.close()
 
 def kanallarni_ol(chat_id):
-    conn = sqlite3.connect("bot_bazasi.db")
-    cursor = conn.cursor()
-    cursor.execute("SELECT kanal FROM kanallar WHERE chat_id = ?", (chat_id,))
-    natija = [row[0] for row in cursor.fetchall()]
-    conn.close()
-    return natija
+    with db_lock:
+        conn = sqlite3.connect("bot_bazasi.db", check_same_thread=False)
+        cursor = conn.cursor()
+        cursor.execute("SELECT kanal FROM kanallar WHERE chat_id = ?", (chat_id,))
+        natija = [row[0] for row in cursor.fetchall()]
+        conn.close()
+        return natija
 
 def kanal_qosh(chat_id, kanal):
-    conn = sqlite3.connect("bot_bazasi.db")
-    cursor = conn.cursor()
-    cursor.execute("INSERT OR IGNORE INTO kanallar (chat_id, kanal) VALUES (?, ?)", (chat_id, kanal))
-    conn.commit()
-    conn.close()
+    with db_lock:
+        conn = sqlite3.connect("bot_bazasi.db", check_same_thread=False)
+        cursor = conn.cursor()
+        cursor.execute("INSERT OR IGNORE INTO kanallar (chat_id, kanal) VALUES (?, ?)", (chat_id, kanal))
+        conn.commit()
+        conn.close()
 
 def kanal_ochir(chat_id, kanal):
-    conn = sqlite3.connect("bot_bazasi.db")
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM kanallar WHERE chat_id = ? AND kanal = ?", (chat_id, kanal))
-    conn.commit()
-    conn.close()
+    with db_lock:
+        conn = sqlite3.connect("bot_bazasi.db", check_same_thread=False)
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM kanallar WHERE chat_id = ? AND kanal = ?", (chat_id, kanal))
+        conn.commit()
+        conn.close()
 
 # --- ADMIN TEKSHIRUVI ---
 async def admin_mi(message: types.Message):
@@ -238,11 +259,12 @@ async def start_handler(message: types.Message):
 async def stat_handler(message: types.Message):
     if message.chat.type == "private":
         return await message.answer("Faqat guruhlarda ishlaydi.")
-    conn = sqlite3.connect("bot_bazasi.db")
-    cursor = conn.cursor()
-    cursor.execute("SELECT xabarlar_soni FROM statistika WHERE chat_id = ?", (message.chat.id,))
-    natija = cursor.fetchone()
-    conn.close()
+    with db_lock:
+        conn = sqlite3.connect("bot_bazasi.db", check_same_thread=False)
+        cursor = conn.cursor()
+        cursor.execute("SELECT xabarlar_soni FROM statistika WHERE chat_id = ?", (message.chat.id,))
+        natija = cursor.fetchone()
+        conn.close()
     jami_xabarlar = natija[0] if natija else 0
     jami_azolar = await bot.get_chat_member_count(message.chat.id)
     kanallar = kanallarni_ol(message.chat.id)
@@ -360,14 +382,32 @@ async def group_filter(message: types.Message):
         return
     xabarni_sana(message.chat.id)
 
-# --- ISHGA TUSHIRISH ---
+# --- ISHGA TUSHIRISH (avtomatik qayta ulanish bilan) ---
 async def main():
     logging.basicConfig(level=logging.INFO)
     baza_yarat()
+
+    # HTTP server
     t = threading.Thread(target=http_server, daemon=True)
     t.start()
+
+    # Keep-alive ping
+    k = threading.Thread(target=keep_alive, daemon=True)
+    k.start()
+
     print("✅ Bot ishga tushdi!")
-    await dp.start_polling(bot)
+
+    # Avtomatik qayta ulanish
+    while True:
+        try:
+            await dp.start_polling(
+                bot,
+                allowed_updates=dp.resolve_used_update_types(),
+                polling_timeout=30
+            )
+        except Exception as e:
+            print(f"⚠️ Polling xato: {e}. 5 soniyadan keyin qayta ulanadi...")
+            await asyncio.sleep(5)
 
 if __name__ == "__main__":
     try:
