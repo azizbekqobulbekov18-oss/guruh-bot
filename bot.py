@@ -1,4 +1,3 @@
-
 import asyncio
 import logging
 import sqlite3
@@ -13,7 +12,7 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ChatPermis
 TOKEN = "8972599548:AAFp4yMJcKTp1TvQljMwwBNtpNAofLrUf00"
 
 # === RENDER URL ni o'zingiznikiga almashtiring ===
-RENDER_URL = "https://guruh-bot-q4ib.onrender.com"
+RENDER_URL = "https://YOUR_APP_NAME.onrender.com"
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
